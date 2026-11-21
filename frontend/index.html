@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ru" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Knowledge Hub</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
+<script>tailwind.config = { darkMode: 'class', theme: { extend: { colors: { ink: '#0b0d12', panel: '#12151c', edge: '#232834', accent: '#22d3ee' } } } }</script>
+<style>
+  [v-cloak]{display:none} body{background:#0b0d12;color:#e5e7eb;font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+  .scroll::-webkit-scrollbar{width:8px}.scroll::-webkit-scrollbar-thumb{background:#2a3040;border-radius:8px}
+  .cursor::after{content:"▍";animation:b 1s steps(2) infinite;color:#22d3ee}@keyframes b{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app" v-cloak class="min-h-screen flex flex-col">
+  <!-- Header -->
+  <header class="border-b border-edge bg-panel/80 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-4">
+      <div class="flex items-center gap-2 font-semibold"><span class="w-7 h-7 rounded-lg bg-accent/20 text-accent grid place-items-center">◆</span> RAG Knowledge Hub</div>
+      <nav class="flex gap-1 text-sm">
+        <button v-for="t in tabs" :key="t.id" @click="tab=t.id" :class="tab===t.id?'bg-accent/15 text-accent':'text-gray-400 hover:text-gray-200'" class="px-3 py-1.5 rounded-lg transition">{{ t.label }}</button>
+      </nav>
+      <div class="ml-auto flex items-center gap-2 text-sm">
+        <label class="text-gray-500">Тенант</label>
+        <select v-model="tenant" class="bg-ink border border-edge rounded-lg px-2 py-1"><option v-for="t in tenants" :key="t">{{ t }}</option></select>
+        <label class="text-gray-500 ml-2">Роль</label>
+        <select v-model="role" class="bg-ink border border-edge rounded-lg px-2 py-1"><option v-for="r in roles" :key="r">{{ r }}</option></select>
+      </div>
+    </div>
+  </header>
+
+  <div v-if="authError" class="max-w-3xl mx-auto mt-10 p-4 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm">{{ authError }}</div>
+
+  <main v-else class="flex-1 max-w-7xl w-full mx-auto px-4 py-6">
+    <!-- ============ CHAT ============ -->
+    <section v-show="tab==='chat'" class="flex flex-col gap-4">
+      <div class="flex flex-wrap items-center gap-3 text-sm">
+        <div class="inline-flex rounded-lg border border-edge overflow-hidden">
+          <button @click="mode='hybrid_rrf'" :class="mode==='hybrid_rrf'?'bg-accent/20 text-accent':'text-gray-400'" class="px-3 py-1.5">Hybrid RRF</button>
+          <button @click="mode='vector_only'" :class="mode==='vector_only'?'bg-accent/20 text-accent':'text-gray-400'" class="px-3 py-1.5">Vector only</button>
+        </div>
+        <label class="flex items-center gap-2 text-gray-400"><input type="checkbox" v-model="useCache" class="accent-cyan-400"> кэш ответов</label>
+        <span class="text-gray-500">Попробуйте: «Сколько дней отпуска?», «Срок оплаты по договору ДГ-2024/17», «Остаток SKU-48213». Смените роль на guest и спросите про оклад Senior.</span>
+      </div>
+      <div ref="chatBox" class="scroll bg-panel border border-edge rounded-2xl p-4 min-h-[50vh] max-h-[62vh] overflow-y-auto space-y-6">
+        <p v-if="!messages.length" class="text-gray-500 text-center mt-16">Задайте вопрос по документам вашего тенанта — ответ строится только по найденным фрагментам.</p>
+        <div v-for="(m,i) in messages" :key="i">
+          <div v-if="m.role==='user'" class="flex justify-end"><div class="bg-accent/15 border border-accent/30 rounded-2xl px-4 py-2 max-w-[80%]">{{ m.text }}</div></div>
+          <div v-else class="space-y-3">
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span v-if="m.meta" class="px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300">{{ m.meta.mode==='hybrid_rrf'?'Hybrid RRF':'Vector' }}</span>
+              <span v-if="m.done&&m.done.cache_hit" class="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300">Cache HIT</span>
+              <span v-if="m.done&&m.done.refused" class="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300">Отказ: нет ответа в документах</span>
+              <span v-if="m.done&&m.done.injection_flags" class="px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-300">Вырезано prompt-инъекций: {{ m.done.injection_flags }}</span>
+              <span v-if="m.done" class="px-2 py-0.5 rounded-full bg-white/5 text-gray-400">{{ Math.round(m.done.retrieval_ms+m.done.generation_ms) }} мс</span>
+            </div>
+            <div class="whitespace-pre-wrap leading-relaxed" :class="{cursor:m.streaming}">{{ m.text }}</div>
+            <div v-if="m.citations&&m.citations.length" class="flex flex-wrap gap-2">
+              <button v-for="c in m.citations" :key="c.chunk_id" @click="drawer=c" class="text-left text-xs px-3 py-2 rounded-xl border border-edge bg-ink hover:border-accent/60 transition">
+                <span class="text-accent">[{{ c.index }}]</span> {{ c.filename }} <span class="text-gray-500">• {{ c.location||'—' }} • {{ c.score.toFixed(2) }}</span>
+              </button>
+            </div>
+            <div v-if="m.done&&m.done.trace_id" class="flex gap-2 text-sm">
+              <button @click="rate(m,1)" :class="m.rating===1?'text-emerald-400':'text-gray-500 hover:text-gray-300'">👍</button>
+              <button @click="rate(m,-1)" :class="m.rating===-1?'text-rose-400':'text-gray-500 hover:text-gray-300'">👎</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <form @submit.prevent="ask" class="flex gap-2">
+        <input v-model="question" :disabled="busy" placeholder="Спросите о документах…" class="flex-1 bg-panel border border-edge rounded-xl px-4 py-3 focus:outline-none focus:border-accent/60">
+        <button :disabled="busy||!question.trim()" class="px-5 rounded-xl bg-accent text-ink font-medium disabled:opacity-40">Отправить</button>
+      </form>
+    </section>
+
+    <!-- ============ KNOWLEDGE BASE ============ -->
+    <section v-show="tab==='kb'" class="space-y-5">
+      <div class="grid md:grid-cols-[1fr_auto] gap-4 items-stretch">
+        <div @dragover.prevent="drag=true" @dragleave="drag=false" @drop.prevent="onDrop" @click="$refs.file.click()"
+             :class="drag?'border-accent bg-accent/10':'border-edge'" class="border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer bg-panel transition">
+          <div class="text-lg">Перетащите файлы сюда</div>
+          <div class="text-sm text-gray-500 mt-1">PDF · XLSX · CSV · DOCX · MD · TXT (нужна роль manager+)</div>
+          <input ref="file" type="file" multiple class="hidden" accept=".pdf,.xlsx,.xlsm,.csv,.docx,.md,.markdown,.txt" @change="onPick">
+        </div>
+        <div class="bg-panel border border-edge rounded-2xl p-4 text-sm space-y-2 min-w-[240px]">
+          <label class="text-gray-400">Уровень доступа документа</label>
+          <select v-model="uploadLevel" class="w-full bg-ink border border-edge rounded-lg px-2 py-1.5"><option v-for="r in roles" :key="r">{{ r }}</option></select>
+          <p class="text-xs text-gray-500">Документ видят роли не ниже выбранной. Фильтр применяется в SQL до выборки чанков.</p>
+        </div>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 text-xs text-gray-400">
+        <span class="px-2 py-1 rounded-lg bg-panel border border-edge">upload</span>→
+        <span class="px-2 py-1 rounded-lg bg-panel border border-edge">Kafka · rag.documents.ingest</span>→
+        <span class="px-2 py-1 rounded-lg bg-panel border border-edge">worker: parse → chunk → embed</span>→
+        <span class="px-2 py-1 rounded-lg bg-panel border border-edge">pgvector + FTS</span>
+      </div>
+      <div class="bg-panel border border-edge rounded-2xl overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="text-gray-500 text-left"><tr><th class="p-3">Файл</th><th>Доступ</th><th>Статус</th><th>Чанки</th><th>Размер</th></tr></thead>
+          <tbody>
+            <tr v-for="d in docs" :key="d.id" @click="openDoc(d)" class="border-t border-edge hover:bg-white/5 cursor-pointer">
+              <td class="p-3">{{ d.filename }}</td><td>{{ d.access_level }}</td>
+              <td><span :class="statusClass(d.status)" class="px-2 py-0.5 rounded-full text-xs">{{ d.status }}</span><span v-if="d.error" class="text-rose-400 text-xs ml-2" :title="d.error">ошибка</span></td>
+              <td>{{ d.chunk_count }}</td><td>{{ (d.size_bytes/1024).toFixed(1) }} КБ</td>
+            </tr>
+            <tr v-if="!docs.length"><td colspan="5" class="p-6 text-center text-gray-500">Нет доступных документов для этой роли</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-if="openedDoc" class="bg-panel border border-edge rounded-2xl p-4">
+        <div class="flex justify-between mb-3"><b>Чанки: {{ openedDoc.filename }}</b><button @click="openedDoc=null" class="text-gray-500">закрыть</button></div>
+        <div class="scroll max-h-96 overflow-y-auto space-y-2">
+          <div v-for="c in chunks" :key="c.id" class="text-xs border border-edge rounded-xl p-3 bg-ink">
+            <div class="text-gray-500 mb-1">#{{ c.index }} <span v-if="c.page">• стр. {{ c.page }}</span><span v-if="c.sheet"> • лист «{{ c.sheet }}»</span><span v-if="c.section"> • {{ c.section }}</span></div>
+            <pre class="whitespace-pre-wrap font-sans text-gray-300">{{ c.content }}</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ TRACES & INTEGRATIONS ============ -->
+    <section v-show="tab==='traces'" class="space-y-5">
+      <div v-if="forbidden.traces" class="p-4 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm">Трейсы и интеграции доступны с роли manager.</div>
+      <template v-else>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div v-for="k in kpis" :key="k.l" class="bg-panel border border-edge rounded-2xl p-4"><div class="text-gray-500 text-xs">{{ k.l }}</div><div class="text-2xl font-semibold mt-1">{{ k.v }}</div></div>
+        </div>
+        <div class="grid lg:grid-cols-2 gap-5">
+          <div class="bg-panel border border-edge rounded-2xl p-4">
+            <div class="font-medium mb-3">Трейсы</div>
+            <div class="scroll max-h-[420px] overflow-y-auto text-sm space-y-1">
+              <button v-for="t in traces" :key="t.id" @click="openTrace(t)" class="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 flex justify-between gap-3" :class="trace&&trace.id===t.id?'bg-white/5':''">
+                <span class="truncate">{{ t.question }}</span>
+                <span class="text-xs text-gray-500 shrink-0">{{ Math.round(t.retrieval_ms+t.generation_ms) }} мс <span v-if="t.cache_hit" class="text-emerald-400">HIT</span> <span v-if="t.feedback===1">👍</span><span v-if="t.feedback===-1">👎</span></span>
+              </button>
+              <p v-if="!traces.length" class="text-gray-500 p-3">Пока нет запросов</p>
+            </div>
+            <div v-if="trace" class="mt-4 border-t border-edge pt-3 text-xs space-y-2">
+              <div class="text-gray-500">X-Request-ID: <span class="text-gray-300">{{ trace.request_id }}</span> • {{ trace.tenant_id }}/{{ trace.role }} • {{ trace.mode }} • {{ trace.provider }}</div>
+              <div>retrieval {{ trace.retrieval_ms }} мс · generation {{ trace.generation_ms }} мс · tokens {{ trace.prompt_tokens }}/{{ trace.completion_tokens }} · injection {{ trace.injection_flags }}</div>
+              <pre class="whitespace-pre-wrap font-sans text-gray-300 bg-ink rounded-lg p-2">{{ trace.answer }}</pre>
+              <div class="text-gray-500">Цитаты: <span v-for="c in trace.citations" :key="c.chunk_id" class="mr-2 text-gray-300">[{{ c.index }}] {{ c.filename }} {{ c.location }}</span></div>
+            </div>
+          </div>
+          <div class="bg-panel border border-edge rounded-2xl p-4">
+            <div class="flex items-center justify-between mb-3"><div class="font-medium">Битрикс24 → Kafka → воркер</div>
+              <button @click="simulate" :disabled="simBusy" class="px-3 py-1.5 rounded-lg bg-accent text-ink text-sm font-medium disabled:opacity-40">Симулировать вебхук лида</button></div>
+            <div class="scroll max-h-[480px] overflow-y-auto space-y-3 text-sm">
+              <div v-for="e in events" :key="e.id" class="border border-edge rounded-xl p-3 bg-ink">
+                <div class="flex justify-between"><b>{{ e.event }}</b><span :class="statusClass(e.status)" class="px-2 py-0.5 rounded-full text-xs">{{ e.status }}</span></div>
+                <ol class="mt-2 space-y-1 text-xs text-gray-400"><li v-for="(s,i) in e.steps" :key="i">› {{ s.step }}<span v-if="s.sources!==undefined"> · источников: {{ s.sources }}</span></li></ol>
+                <pre v-if="e.result&&e.result.comment" class="mt-2 whitespace-pre-wrap font-sans text-xs text-gray-300 bg-panel rounded-lg p-2">{{ e.result.comment }}</pre>
+              </div>
+              <p v-if="!events.length" class="text-gray-500 p-3">Событий пока нет — нажмите кнопку симуляции.</p>
+            </div>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <!-- ============ EVAL ============ -->
+    <section v-show="tab==='eval'" class="space-y-5">
+      <div class="flex items-center gap-3">
+        <button @click="runEval" :disabled="evalBusy" class="px-4 py-2 rounded-xl bg-accent text-ink font-medium disabled:opacity-40">{{ evalBusy?'Считаем…':'Запустить бенчмарк' }}</button>
+        <span class="text-sm text-gray-500">Эталонный датасет: PDF, Excel, DOCX, Markdown, CSV; Recall@5, MRR, средняя задержка. Нужна роль manager+.</span>
+      </div>
+      <div v-if="evalError" class="p-3 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm">{{ evalError }}</div>
+      <div v-if="evalRes" class="grid md:grid-cols-2 gap-5">
+        <div v-for="m in evalModes" :key="m.key" class="bg-panel border border-edge rounded-2xl p-5">
+          <div class="font-medium mb-4">{{ m.label }}</div>
+          <div v-for="b in [['Recall@5',evalRes[m.key].recall_at_5,1],['MRR',evalRes[m.key].mrr,1]]" :key="b[0]" class="mb-3">
+            <div class="flex justify-between text-sm"><span class="text-gray-400">{{ b[0] }}</span><span>{{ b[1].toFixed(3) }}</span></div>
+            <div class="h-2 bg-ink rounded-full mt-1 overflow-hidden"><div :style="{width:(b[1]*100)+'%'}" :class="m.color" class="h-full rounded-full"></div></div>
+          </div>
+          <div class="text-sm text-gray-400">Средняя задержка: <span class="text-gray-200">{{ evalRes[m.key].avg_latency_ms }} мс</span></div>
+        </div>
+        <div class="md:col-span-2 text-sm text-gray-400">Вопросов: {{ evalRes.questions }}. Δ Recall@5 = {{ evalRes.delta.recall_at_5 }}, Δ MRR = {{ evalRes.delta.mrr }} (гибрид минус вектор). Результат зависит от корпуса и провайдера эмбеддингов.</div>
+        <div class="md:col-span-2 bg-panel border border-edge rounded-2xl p-4 text-xs overflow-x-auto">
+          <table class="w-full"><thead class="text-gray-500 text-left"><tr><th class="p-2">Вопрос</th><th>Тип</th><th>Vector: ранг</th><th>Hybrid: ранг</th></tr></thead>
+            <tbody><tr v-for="(d,i) in evalRes.hybrid_rrf.details" :key="i" class="border-t border-edge"><td class="p-2">{{ d.question }}</td><td>{{ d.kind }}</td><td>{{ evalRes.vector_only.details[i].first_relevant_rank ?? '—' }}</td><td>{{ d.first_relevant_rank ?? '—' }}</td></tr></tbody></table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- citation drawer -->
+  <transition name="fade">
+    <aside v-if="drawer" class="fixed top-0 right-0 h-full w-full sm:w-[460px] bg-panel border-l border-edge z-40 shadow-2xl flex flex-col">
+      <div class="p-4 border-b border-edge flex justify-between"><div><div class="font-medium">[{{ drawer.index }}] {{ drawer.filename }}</div><div class="text-xs text-gray-500">{{ drawer.location }} • score {{ drawer.score.toFixed(2) }}</div></div><button @click="drawer=null" class="text-gray-500 text-xl">×</button></div>
+      <pre class="scroll flex-1 overflow-y-auto p-4 whitespace-pre-wrap font-sans text-sm text-gray-300">{{ drawer.text }}</pre>
+    </aside>
+  </transition>
+  <div v-if="toast" class="fixed bottom-5 left-1/2 -translate-x-1/2 bg-panel border border-edge px-4 py-2 rounded-xl text-sm z-50">{{ toast }}</div>
+</div>
+
+<script>
+const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } = Vue
+createApp({
+  setup() {
+    const tabs = [{id:'chat',label:'AI-Чат'},{id:'kb',label:'База знаний'},{id:'traces',label:'Трейсы и Интеграции'},{id:'eval',label:'Eval-лаборатория'}]
+    const roles = ['guest','employee','manager','admin']
+    const tab = ref('chat'), tenant = ref('acme'), role = ref('admin'), identities = ref([]), authError = ref('')
+    const mode = ref('hybrid_rrf'), useCache = ref(true), question = ref(''), messages = ref([]), busy = ref(false), drawer = ref(null), chatBox = ref(null)
+    const docs = ref([]), drag = ref(false), uploadLevel = ref('employee'), openedDoc = ref(null), chunks = ref([])
+    const traces = ref([]), trace = ref(null), stats = ref({}), events = ref([]), simBusy = ref(false), forbidden = reactive({traces:false})
+    const evalRes = ref(null), evalBusy = ref(false), evalError = ref(''), toast = ref('')
+    const evalModes = [{key:'vector_only',label:'Vector Only',color:'bg-sky-400'},{key:'hybrid_rrf',label:'Hybrid (Vector + FTS + RRF)',color:'bg-accent'}]
+    const tenants = computed(() => [...new Set(identities.value.map(i => i.tenant_id))])
+    const token = computed(() => (identities.value.find(i => i.tenant_id===tenant.value && i.role===role.value)||{}).token)
+    const say = (t) => { toast.value = t; setTimeout(() => toast.value = '', 3500) }
+    const api = async (path, opts = {}) => {
+      const r = await fetch('/api/v1' + path, { ...opts, headers: { Authorization: 'Bearer ' + token.value, ...(opts.headers||{}) } })
+      if (!r.ok) { let d = ''; try { d = (await r.json()).detail } catch(e){}; const err = new Error(d || r.statusText); err.status = r.status; throw err }
+      return r.status === 204 ? null : r.json()
+    }
+    const statusClass = s => ({queued:'bg-amber-500/15 text-amber-300',processing:'bg-sky-500/15 text-sky-300',indexed:'bg-emerald-500/15 text-emerald-300',done:'bg-emerald-500/15 text-emerald-300',published:'bg-sky-500/15 text-sky-300',received:'bg-gray-500/15 text-gray-300',failed:'bg-rose-500/15 text-rose-300',dlq:'bg-rose-500/15 text-rose-300'}[s]||'bg-gray-500/15 text-gray-300')
+
+    async function loadDocs() { try { docs.value = await api('/documents') } catch(e) { docs.value = [] } }
+    async function loadTraces() {
+      forbidden.traces = false
+      try { [traces.value, stats.value, events.value] = await Promise.all([api('/traces'), api('/traces/stats'), api('/integrations/events')]) }
+      catch(e) { if (e.status === 403) forbidden.traces = true }
+    }
+    const kpis = computed(() => [
+      {l:'Запросы',v:stats.value.requests ?? 0},{l:'Cache hit rate',v:((stats.value.cache_hit_rate||0)*100).toFixed(0)+'%'},
+      {l:'Средняя задержка',v:(stats.value.avg_latency_ms||0)+' мс'},{l:'Рейтинг',v:stats.value.rating==null?'—':(stats.value.rating*100).toFixed(0)+'% 👍'}])
+    async function refresh() { await loadDocs(); if (tab.value === 'traces') await loadTraces() }
+    watch([tenant, role], () => { messages.value = []; openedDoc.value = null; trace.value = null; evalRes.value = null; refresh() })
+    watch(tab, refresh)
+    let timer; onMounted(async () => {
+      try { identities.value = await (await fetch('/api/v1/demo/identities')).json(); if (!Array.isArray(identities.value)) throw 0 }
+      catch(e) { authError.value = 'Демо-режим выключен (DEMO_MODE=false). Используйте API с Bearer-токеном из RAG_ROLE_TOKENS.'; return }
+      await refresh(); timer = setInterval(refresh, 2500)
+    })
+    onBeforeUnmount(() => clearInterval(timer))
+
+    async function ask() {
+      const q = question.value.trim(); if (!q || busy.value) return
+      question.value = ''; busy.value = true
+      messages.value.push({role:'user',text:q})
+      const m = reactive({role:'assistant',text:'',streaming:true,citations:[],meta:null,done:null,rating:0}); messages.value.push(m)
+      const scroll = () => nextTick(() => { if (chatBox.value) chatBox.value.scrollTop = chatBox.value.scrollHeight })
+      try {
+        const r = await fetch('/api/v1/chat/stream', {method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+token.value}, body: JSON.stringify({question:q, mode:mode.value, use_cache:useCache.value})})
+        if (!r.ok) throw new Error((await r.json().catch(()=>({}))).detail || r.statusText)
+        const reader = r.body.getReader(), dec = new TextDecoder(); let buf = ''
+        while (true) {
+          const {value, done} = await reader.read(); if (done) break
+          buf += dec.decode(value, {stream:true}); let i
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const raw = buf.slice(0, i); buf = buf.slice(i + 2)
+            const ev = /event: (.*)/.exec(raw), data = /data: (.*)/s.exec(raw); if (!ev || !data) continue
+            const payload = JSON.parse(data[1])
+            if (ev[1]==='meta') m.meta = payload; else if (ev[1]==='citations') m.citations = payload
+            else if (ev[1]==='token') { m.text += payload; scroll() } else if (ev[1]==='done') m.done = payload
+            else if (ev[1]==='error') m.text += '\n[ошибка: ' + payload.message + ']'
+          }
+        }
+      } catch(e) { m.text = 'Ошибка: ' + e.message } finally { m.streaming = false; busy.value = false; scroll() }
+    }
+    async function rate(m, v) { try { await api('/traces/'+m.done.trace_id+'/feedback', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({rating:v})}); m.rating = v } catch(e) { say(e.message) } }
+
+    async function upload(files) {
+      for (const f of files) {
+        const fd = new FormData(); fd.append('file', f); fd.append('access_level', uploadLevel.value)
+        try { const r = await api('/documents', {method:'POST', body: fd}); say(f.name + ': ' + r.action) } catch(e) { say(f.name + ': ' + e.message) }
+      }
+      loadDocs()
+    }
+    const onDrop = e => { drag.value = false; upload([...e.dataTransfer.files]) }
+    const onPick = e => { upload([...e.target.files]); e.target.value = '' }
+    async function openDoc(d) { openedDoc.value = d; try { chunks.value = await api('/documents/' + d.id + '/chunks') } catch(e) { chunks.value = [] } }
+    async function openTrace(t) { try { trace.value = await api('/traces/' + t.id) } catch(e) { say(e.message) } }
+    async function simulate() { simBusy.value = true; try { await api('/integrations/bitrix24/simulate', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); say('Вебхук отправлен в Kafka'); setTimeout(loadTraces, 600) } catch(e) { say(e.message) } finally { simBusy.value = false } }
+    async function runEval() { evalBusy.value = true; evalError.value = ''; try { evalRes.value = await api('/eval/run', {method:'POST'}) } catch(e) { evalError.value = e.status===403 ? 'Нужна роль manager или admin.' : e.message } finally { evalBusy.value = false } }
+
+    return { tabs, roles, tab, tenant, role, tenants, authError, mode, useCache, question, messages, busy, drawer, chatBox, docs, drag, uploadLevel, openedDoc, chunks,
+      traces, trace, kpis, events, simBusy, forbidden, evalRes, evalBusy, evalError, evalModes, toast, statusClass, ask, rate, onDrop, onPick, openDoc, openTrace, simulate, runEval }
+  }
+}).mount('#app')
+</script>
+</body>
+</html>

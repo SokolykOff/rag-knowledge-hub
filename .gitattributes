@@ -1,0 +1,5 @@
+frontend/** linguist-vendored
+* text=auto eol=lf
+*.pdf binary
+*.xlsx binary
+*.docx binary
